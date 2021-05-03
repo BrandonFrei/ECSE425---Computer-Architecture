@@ -1,0 +1,405 @@
+LIBRARY ieee;
+USE ieee.std_logic_1164.all;
+USE ieee.numeric_std.all;
+USE std.textio.all;
+USE ieee.std_logic_textio.all;
+
+ENTITY pipeline IS
+	GENERIC(
+		register_size : INTEGER := 32;
+		ram_size: INTEGER := 8192;
+		reg_delay : time := 1 ns;
+		clock_period : time := 1 ns;
+		instruction_mem_size : INTEGER := 4096;
+		mem_delay : time := 10 ns
+	);
+	PORT (
+		clock: IN STD_LOGIC;
+		reset: IN STD_LOGIC
+	);
+END pipeline;
+
+
+
+ARCHITECTURE pipeline_behavior of pipeline IS
+component instruction_memory is
+	PORT (
+		clock: IN STD_LOGIC;
+		writedata: IN STD_LOGIC_VECTOR (31 DOWNTO 0);
+		address: IN INTEGER RANGE 0 TO ram_size-1;
+		memwrite: IN STD_LOGIC;
+		memread: IN STD_LOGIC;
+		readdata: OUT STD_LOGIC_VECTOR (31 DOWNTO 0);
+		waitrequest: OUT STD_LOGIC
+	);
+end component;
+
+component fetch is
+	Port ( 	
+		clock : in std_logic;
+		mux_selector : in std_logic;
+		PC_address : in std_logic_vector(31 downto 0) := x"00000000";	
+		number_four: in STD_LOGIC_VECTOR (31 downto 0) := x"00000004";
+		IF_adder_result: in STD_LOGIC_VECTOR (31 downto 0);
+		EX_adder_result: in STD_LOGIC_VECTOR (31 downto 0);
+		IF_mux_output: out STD_LOGIC_VECTOR (31 downto 0);
+		EX_add_result : in std_logic_vector(31 downto 0);
+		instruction : out std_logic_vector(31 downto 0)
+);
+
+end component;
+
+component decode is
+	PORT (
+		clock: IN STD_LOGIC;
+		instruction: IN STD_LOGIC_VECTOR (31 DOWNTO 0);
+		
+		rs: OUT INTEGER RANGE 0 to register_size - 1;
+		rt: OUT INTEGER RANGE 0 to register_size - 1;
+		rd: OUT INTEGER RANGE 0 to register_size - 1;
+		
+		address: OUT STD_LOGIC_VECTOR (25 DOWNTO 0);
+		
+		
+		shamt : OUT STD_LOGIC_VECTOR(4 DOWNTO 0);
+		funct : OUT STD_LOGIC_VECTOR(5 DOWNTO 0);
+		
+		opcode : OUT  STD_LOGIC_VECTOR(5 DOWNTO 0);
+		
+		immediate : OUT  STD_LOGIC_VECTOR(15 DOWNTO 0);
+		
+		Rinst: OUT STD_LOGIC;
+		Jinst: OUT STD_LOGIC;
+		Iinst: OUT STD_LOGIC
+	);
+end component;
+
+component registers is 
+		PORT (
+		clock: IN STD_LOGIC;
+		writedata: IN STD_LOGIC_VECTOR (31 DOWNTO 0);
+		rs: IN INTEGER RANGE 0 to register_size - 1;
+		rt: IN INTEGER RANGE 0 to register_size - 1;
+		rd: IN INTEGER RANGE 0 to register_size - 1;
+		
+		read_data_1: OUT STD_LOGIC_VECTOR (31 DOWNTO 0);
+		read_data_2: OUT STD_LOGIC_VECTOR (31 DOWNTO 0);
+		
+		alu_output_data: IN STD_LOGIC_VECTOR (31 DOWNTO 0);
+		
+		reg_read: IN STD_LOGIC;
+		reg_write: IN STD_LOGIC;
+		read_data: OUT STD_LOGIC_VECTOR (31 DOWNTO 0);
+		waitrequest: OUT STD_LOGIC
+	);
+end component;
+
+component sign_extention is 
+	PORT (
+		input_data: IN STD_LOGIC_VECTOR (15 DOWNTO 0);
+		output_data: OUT STD_LOGIC_VECTOR (31 DOWNTO 0)
+	);
+end component;
+
+component execute is 
+	PORT (
+		clock: IN STD_LOGIC;
+		
+		Rinst: IN STD_LOGIC;
+		Jinst: IN STD_LOGIC;
+		Iinst: IN STD_LOGIC;
+		
+		-- R instruction signals
+		shamt : IN STD_LOGIC_VECTOR(4 DOWNTO 0);
+		funct : IN STD_LOGIC_VECTOR(5 DOWNTO 0);
+		immediate : IN  STD_LOGIC_VECTOR(15 DOWNTO 0);
+		
+		-- J type instruction signall
+		Jtype_address: IN STD_LOGIC_VECTOR(25 downto 0); -- This is address output from decode.vhd
+		
+		address_in: IN STD_LOGIC_VECTOR(31 downto 0); -- This is PC address
+		
+		read_data_rs: IN STD_LOGIC_VECTOR(31 DOWNTO 0);
+		read_data_rt: IN STD_LOGIC_VECTOR(31 DOWNTO 0);
+
+		address_out: OUT STD_LOGIC_VECTOR(31 downto 0);
+		write_data_rd: OUT STD_LOGIC_VECTOR(31 DOWNTO 0)
+		);
+end component;
+
+component memory_access is 
+	PORT (
+		clock: IN STD_LOGIC;
+		
+		-- from decode stage
+		writedata: IN STD_LOGIC_VECTOR (31 DOWNTO 0);
+		
+		-- from execute
+		address: IN STD_LOGIC_VECTOR (31 DOWNTO 0);
+		
+		-- output to write back 
+		readdata: OUT STD_LOGIC_VECTOR (31 DOWNTO 0);
+		
+		-- control signals to determine whether we write or read to memory
+		memwrite: IN STD_LOGIC;
+		memread: IN STD_LOGIC;
+		
+		-- signals between mem access and data memory (same as cache assignemnt)
+		m_address: out STD_LOGIC_VECTOR (31 downto 0);
+		m_read : out std_logic;
+		m_readdata : in std_logic_vector (31 downto 0);
+		m_write : out std_logic;
+		m_writedata : out std_logic_vector (31 downto 0);
+		m_waitrequest : in std_logic
+	);
+end component;
+
+component data_memory is 
+	PORT (
+		clock: IN STD_LOGIC;
+		writedata: IN STD_LOGIC_VECTOR (31 DOWNTO 0);
+		address: IN INTEGER RANGE 0 TO ram_size-1;
+		memwrite: IN STD_LOGIC;
+		memread: IN STD_LOGIC;
+		write_file: IN STD_LOGIC;
+
+		readdata: OUT STD_LOGIC_VECTOR (31 DOWNTO 0);
+		waitrequest: OUT STD_LOGIC
+	);
+end component;
+
+component write_back is 
+	Port ( 	clock : in std_logic;
+		ALU_result 	: in std_logic_vector(31 downto 0);
+		mem_readdata	: in std_logic_vector(31 downto 0);
+		WB_mux_output 	: out std_logic_vector(31 downto 0)
+);
+end component;
+
+	-- instruction memory signals
+	signal writedataInstMEM: STD_LOGIC_VECTOR (31 DOWNTO 0);
+	signal addressInstMEM: INTEGER RANGE 0 TO ram_size-1;
+	signal memwrite: STD_LOGIC;
+	signal memread: STD_LOGIC;
+	signal readdata: STD_LOGIC_VECTOR (31 DOWNTO 0);
+	signal waitrequestInstMEM: STD_LOGIC;
+	
+	-- fetch stage signals
+	signal mux_selector : std_logic;
+	signal PC_address : std_logic_vector(31 downto 0) := x"00000000";	
+	signal number_four: STD_LOGIC_VECTOR (31 downto 0) := x"00000004";
+	signal IF_adder_result: STD_LOGIC_VECTOR (31 downto 0);
+	signal EX_adder_result: STD_LOGIC_VECTOR (31 downto 0);
+	signal IF_mux_output: STD_LOGIC_VECTOR (31 downto 0);
+	signal EX_add_result : std_logic_vector(31 downto 0);
+	signal instructionIF : std_logic_vector(31 downto 0);
+	
+	-- instruction decode signals
+	signal instructionID:STD_LOGIC_VECTOR (31 DOWNTO 0);
+	signal rs: INTEGER RANGE 0 to register_size - 1;
+	signal rt: INTEGER RANGE 0 to register_size - 1;
+	signal rd: INTEGER RANGE 0 to register_size - 1;
+	signal addressID: STD_LOGIC_VECTOR (25 DOWNTO 0);
+	signal shamtID : STD_LOGIC_VECTOR(4 DOWNTO 0);
+	signal functID : STD_LOGIC_VECTOR(5 DOWNTO 0);
+	signal opcodeID : STD_LOGIC_VECTOR(5 DOWNTO 0);
+	signal immediateID : STD_LOGIC_VECTOR(15 DOWNTO 0);
+	signal RinstID: STD_LOGIC;
+	signal JinstID: STD_LOGIC;
+	signal IinstID: STD_LOGIC;
+	
+	-- registers signals
+	signal writedataReg: STD_LOGIC_VECTOR (31 DOWNTO 0);
+	signal rsReg: INTEGER RANGE 0 to register_size - 1;
+	signal rtReg: INTEGER RANGE 0 to register_size - 1;
+	signal rdReg: INTEGER RANGE 0 to register_size - 1;
+	signal read_data_1: STD_LOGIC_VECTOR (31 DOWNTO 0);
+	signal read_data_2: STD_LOGIC_VECTOR (31 DOWNTO 0);
+	signal alu_output_data: STD_LOGIC_VECTOR (31 DOWNTO 0);
+	signal reg_read: STD_LOGIC;
+	signal reg_write: STD_LOGIC;
+	signal read_data: STD_LOGIC_VECTOR (31 DOWNTO 0);
+	signal waitrequestReg: STD_LOGIC;
+	
+	-- sign extend signals 
+	signal input_data: STD_LOGIC_VECTOR (15 DOWNTO 0);
+	signal output_data: STD_LOGIC_VECTOR (31 DOWNTO 0);
+	
+	-- execute stage signals
+	signal RinstEX: STD_LOGIC;
+	signal JinstEX: STD_LOGIC;
+	signal IinstEX: STD_LOGIC;
+	-- R instruction signals
+	signal shamtEX : STD_LOGIC_VECTOR(4 DOWNTO 0);
+	signal functEX : STD_LOGIC_VECTOR(5 DOWNTO 0);
+	signal immediateEX : STD_LOGIC_VECTOR(15 DOWNTO 0);
+	 -- J type instruction signall
+	signal Jtype_address: STD_LOGIC_VECTOR(25 downto 0); -- This is address output from decode.vhd
+	signal address_in: STD_LOGIC_VECTOR(31 downto 0); -- This is PC address
+	signal read_data_rs: STD_LOGIC_VECTOR(31 DOWNTO 0);
+	signal read_data_rt: STD_LOGIC_VECTOR(31 DOWNTO 0);
+	signal address_out: STD_LOGIC_VECTOR(31 downto 0);
+	signal write_data_rd: STD_LOGIC_VECTOR(31 DOWNTO 0);
+	
+	-- memory access signals
+	-- from decode stage
+	signal writedataMEM: STD_LOGIC_VECTOR (31 DOWNTO 0);
+	-- from execute
+	signal addressMEM: STD_LOGIC_VECTOR (31 DOWNTO 0);
+	-- output to write back 
+	signal readdataMEM: STD_LOGIC_VECTOR (31 DOWNTO 0);
+	-- control signals to determine whether we write or read to memory
+	signal memwriteMEM: STD_LOGIC;
+	signal memreadMEM: STD_LOGIC;
+	-- signals between mem access and data memory (same as cache assignemnt)
+	signal m_address: STD_LOGIC_VECTOR (31 downto 0);
+	signal m_read : std_logic;
+	signal m_readdata : std_logic_vector (31 downto 0);
+	signal m_write : std_logic;
+	signal m_writedata : std_logic_vector (31 downto 0);
+	signal m_waitrequest : std_logic;
+	
+	-- data memory
+	signal writedataDMem: STD_LOGIC_VECTOR (31 DOWNTO 0);
+	signal addressDMem: INTEGER RANGE 0 TO ram_size-1;
+	signal memwriteDMem: STD_LOGIC;
+	signal memreadDMem: STD_LOGIC;
+	signal write_file: STD_LOGIC;
+	signal readdataDMem: STD_LOGIC_VECTOR (31 DOWNTO 0);
+	signal waitrequestDMem: STD_LOGIC;
+	
+	-- write back signals
+	signal ALU_result 	: std_logic_vector(31 downto 0);
+	signal mem_readdata	: std_logic_vector(31 downto 0);
+	signal WB_mux_output 	: std_logic_vector(31 downto 0);
+	
+
+begin
+	instruction_fetch: fetch
+	port map(
+		clock => clock,
+		mux_selector => mux_selector,
+		PC_address => PC_address,
+		number_four => number_four,
+		IF_adder_result => IF_adder_result,
+		EX_adder_result => EX_adder_result,
+		IF_mux_output => IF_mux_output,
+		EX_add_result => EX_add_result,
+		instruction => instructionIF
+	);
+	
+	instruction_memory_inst: instruction_memory
+	port map (
+		clock => clock,
+		writedata => writedataInstMEM,
+		address => addressInstMEM,
+		memwrite => memwrite,
+		memread => memread,
+		readdata => readdata,
+		waitrequest => waitrequestInstMEM
+	);
+
+	decode_inst: decode
+	port map(
+		clock => clock,
+		instruction => instructionID,
+		rs => rs,
+		rt => rt,
+		rd => rd,
+		address => addressID,
+		shamt => shamtID,
+		funct => functID,
+		opcode => opcodeID,
+		immediate => immediateID,
+		Rinst => RinstID,
+		Jinst => JinstID,
+		Iinst => IinstID
+	);
+	
+	registers_inst: registers
+	port map(
+		clock => clock,
+		writedata => WB_mux_output,
+		rs => rsReg,
+		rt => rtReg,
+		rd => rdReg,
+		read_data_1 => read_data_1,
+		read_data_2 => read_data_2,
+		alu_output_data => alu_output_data,
+		reg_read => reg_read,
+		reg_write => reg_write,
+		read_data => read_data,
+		waitrequest => waitrequestReg
+	);
+	
+	execute_stage: execute
+	port map (
+		clock => clock,
+		Rinst => RinstEX,
+		Jinst => JinstEX,
+		Iinst => IinstEX,
+		-- R instruction signals
+		shamt => shamtEX,
+		funct => functEX,
+		immediate => immediateEX,
+		 -- J type instruction signall
+		Jtype_address => Jtype_address,
+		address_in => address_in,
+		read_data_rs => read_data_rs,
+		read_data_rt => read_data_rt,
+		address_out => address_out,
+		write_data_rd => write_data_rd
+	);
+	
+	memory_access_inst: memory_access
+	PORT map (
+		clock => clock,
+	
+		 -- from decode stage
+		writedata => writedataMEM,
+		
+		-- from execute
+		address => addressMEM,
+		 
+		 -- output to write back 
+		readdata => readdataMEM,
+		
+		 -- control signals to determine whether we write or read to memory
+		memwrite => memwriteMEM,
+		memread => memreadMEM,
+		 
+		 -- signals between mem access and data memory (same as cache assignemnt)
+		m_address => m_address,
+		m_read => m_read,
+		m_readdata => m_readdata,
+		m_write => m_write,
+		m_writedata => m_writedata,
+		m_waitrequest => m_waitrequest
+	);
+	
+	sign_extention_inst: sign_extention
+	PORT map (
+		input_data => input_data,
+		output_data => output_data
+	);
+		
+	write_back_inst: write_back
+	Port map(
+		clock => clock,
+		ALU_result => ALU_result,
+		mem_readdata => mem_readdata,
+		WB_mux_output => WB_mux_output
+	);
+	
+	data_memory_inst: data_memory
+	port map(
+		clock => clock,
+		writedata => writedataDMem,
+		address => addressDMem,
+		memwrite => memwriteDMem,
+		memread => memreadDMem,
+		write_file => write_file,
+		readdata => readdataDMem,
+		waitrequest => waitrequestDMem
+	);
+end pipeline_behavior;
